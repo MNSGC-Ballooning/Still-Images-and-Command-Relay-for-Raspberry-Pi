@@ -1,4 +1,7 @@
 # Xbee-Relay-and-Still-Images-for-Raspberry-Pi
+By Austin Langford, based on work from MSU-BOREALIS
+
+
 Python code for the Raspberry Pi that uses an RFD900+ radio to receive information from a ground station, and relay it through the xbee radio to other nearby payloads. Also has the ability to take and transmit images
 
 The commandReady file is a multithreaded application for the raspberry pi that takes input from the [RFD900+ radio](http://store.rfdesign.com.au/rfd-900p-modem/). If it is a recognized single byte command, the Pi will enter the correct state for communicating with the ground station for picture transmission or picture settings changes. Requires the arduino to output the GPS coordinates in a specific format.

@@ -1,5 +1,5 @@
-import time, threading
-from multiprocessing import Process, Queue, Value, Array, Manager
+import time
+import threading, Queue
 from time import strftime
 import datetime
 import io
@@ -10,7 +10,158 @@ import os
 import base64
 import hashlib
 
+class GPSThread(threading.Thread):
+    """ A thread to read in raw GPS information, and organize it for the main thread """
+    def __init__(self,threadID,port,baud,timeout, gps, exceptions, resetFlag):			# Constructor
+        threading.Thread.__init__(self)
+        self.threadID = threadID
+        self.port = port
+        self.baud = baud
+        self.timeout = timeout
+        self.gpsQ = gps
+        self.exceptionsQ = exceptions
+        self.resetFlagQ = resetFlag
+
+    def run(self):
+        ardSer = serial.Serial(port = self.port, baudrate = self.baud, timeout = self.timeout)
+        while True:					# Run forever
+            try:
+                line = ardSer.readline()
+                if(line.find("GPGGA") != -1):							# GPGGA indicates it's the GPS stuff we're looking for
+                    try:
+                        ### Parse the GPS Info ###
+                        prev = line[1].split('.')[0]
+                        line = line.split(',')
+                        hours = int(line[1][0:2])
+                        minutes = int(line[1][2:4])
+                        seconds = int(line[1][4:].split('.')[0])
+                        if(line[2] == ''):
+                            lat = 0
+                        else:
+                            lat = float(line[2][0:2]) + (float(line[2][3:]))/60
+                        if(line[3] == ''):
+                            lon = 0
+                        else:
+                            lon = float(line[4][0:3]) + (float(line[4][4:]))/60
+                        if(line[9] == ''):
+                            alt = 0
+                        else:
+                            alt = float(line[7])
+                        sat = int(line[7])
+                        
+                        ### Organize the GPS info, and put it in the queue ###
+                        gpsStr = str(hours)+','+ str(minutes)+','+ str(seconds)+','+ str(lat)+','+str(lon)+','+str(alt)+','+str(sat)+'!'+'\n'
+                        self.gpsQ.put(gpsStr)
+                                        
+                    except Exception,e:
+                        self.exceptionsQ.put(str(e))
+                        
+            ### Catches unexpected errors, restarts the thread ###
+            except Exception, e:
+                self.exceptionsQ.put(str(e))
+                self.resetFlagQ.put('gpsThread dead')
+                ardSer.close()
+                
+class XbeeThread(threading.Thread):
+    """ A thread to read and write to the xbee radio in parallel with the main thread """
+    def __init__(self,threadID,port,baud,timeout,xbeeToSend,xbeeReceived, exceptions, resetFlag):        # Constructor
+        threading.Thread.__init__(self)
+        self.threadID = threadID
+        self.port = port
+        self.baud = baud
+        self.timeout = timeout
+        self.sendQ = xbeeToSend
+        self.receivedQ = xbeeReceived
+        self.exceptionsQ = exceptions
+        self.resetFlagQ = resetFlag
+    
+    def run(self):                      # Thread loop
+        xbee = serial.Serial(port = self.port, baudrate = self.baud, timeout = self.timeout)    # Open the xbee port first thing
+        lastEntry = ''
+        while True:         # Run this code forever
+            try:
+                line = xbee.readline()							# Read from the xbee
+                if(line != lastEntry):						# If it's a new line, add it to the queue
+                    try:
+                        self.receivedQ.put(line)
+                    except Exception, e:
+                        self.exceptionsQ.put(str(e))
+                                
+                while(not self.sendQ.empty()):				# If there's stuff to send, send it, then clear the queue
+                    try:
+                        xbee.write(self.sendQ.get())
+                        
+                    except Exception, e:
+                            self.exceptionsQ.put(str(e))
+                                            
+            except Exception, e:         			# This catches unexpected errors in the thread, and makes sure that the thread will start up again next loop
+                self.exceptionsQ.put(str(e))
+                self.resetFlagQ.put('xThread dead')
+                xbee.close()
+                
+class TakePicture(threading.Thread):
+    
+    def __init__(self, threadID, cameraSettings,folder,imagenumber,picQ):        # Constructor
+        threading.Thread.__init__(self)
+        self.threadID = threadID
+        self.cameraSettings = cameraSettings
+        self.folder = folder
+        self.imagenumber = imagenumber
+        self.q = picQ
+
+    def run(self):
+
+        ### Load the camera settings from the file ###
+    	try:
+            camera = picamera.PiCamera()
+            f = open(self.folder+"camerasettings.txt","r")
+            width = int(f.readline())
+            height = int(f.readline())
+            sharpness = int(f.readline())
+            brightness = int(f.readline())
+            contrast = int(f.readline())
+            saturation = int(f.readline())
+            iso = int(f.readline())
+            f.close()
+            print "Camera Settings Read"
+            
+        except:
+            print "cannot open file/file does not exist"
+            self.q.put('reset')                     # Instruct the main loop to reset the camera if there's an issue with the file
+            
+        try:
+            # Setup the camera with the settings read previously
+            camera.sharpness = sharpness
+            camera.brightness = brightness
+            camera.contrast = contrast
+            camera.saturation = saturation
+            camera.iso = iso
+            camera.resolution = (2592,1944)             # Default max resolution photo
+            extension = '.png'
+            camera.hflip = self.cameraSettings.getHFlip()
+            camera.vflip = self.cameraSettings.getVFlip()
+
+            camera.capture(self.folder+"%s%04d%s" %("image",self.imagenumber,"_a"+extension))     # Take the higher resolution picture
+            print "( 2592 , 1944 ) photo saved"
+
+            fh = open(self.folder+"imagedata.txt","a")              # Save the pictures to imagedata.txt
+            fh.write("%s%04d%s @ time(%s) settings(w=%d,h=%d,sh=%d,b=%d,c=%d,sa=%d,i=%d)\n" % ("image",self.imagenumber,"_a"+extension,str(datetime.datetime.now().strftime("%m/%d/%Y %H:%M:%S")),2592,1944,sharpness,brightness,contrast,saturation,iso))       # Add it to imagedata.txt
+            camera.resolution = (width,height)          # Switch the resolution to the one set by the ground station
+            extension = '.jpg'
+
+            camera.capture(self.folder+"%s%04d%s" %("image",self.imagenumber,"_b"+extension))     # Take the lower resolution picture
+            print "(",width,",",height,") photo saved"
+            fh.write("%s%04d%s @ time(%s) settings(w=%d,h=%d,sh=%d,b=%d,c=%d,sa=%d,i=%d)\n" % ("image",self.imagenumber,"_b"+extension,str(datetime.datetime.now().strftime("%m/%d/%Y %H:%M:%S")),width,height,sharpness,brightness,contrast,saturation,iso))       # Add it to imagedata.txt
+            print "settings file updated"
+            camera.close()
+            fh.close()
+            self.q.put('done')
+        except:                                         # If there's any errors while taking the picture, reset the checkpoint
+            print("Error taking picture")
+            self.q.put('checkpoint')
+
 class Unbuffered:
+    """ Helps eliminate the serial buffer, also logs all print statements to the logfile """
     def __init__(self,stream):
         self.stream = stream
     def write(self,data):
@@ -20,101 +171,92 @@ class Unbuffered:
         logfile.flush()
 
 class CameraSettings:
-	""" A class to handle camera settings """
-	def __init__(self,width,height,sharpness,brightness,contrast,saturation,iso):
-	    self.width = width
-	    self.height = height
-	    self.resolution = (width,height)
-	    self.sharpness = sharpness
-	    self.brightness = brightness
-	    self.contrast = contrast
-	    self.saturation = saturation
-	    self.iso = iso
-	    self.hflip = False
-	    self.vflip = False
+    """ A class to handle camera settings """
+    def __init__(self,width,height,sharpness,brightness,contrast,saturation,iso):
+        self.width = width
+        self.height = height
+        self.resolution = (width,height)
+        self.sharpness = sharpness
+        self.brightness = brightness
+        self.contrast = contrast
+        self.saturation = saturation
+        self.iso = iso
+        self.hflip = False
+        self.vflip = False
 
-	def getWidth(self):
-	    return self.width
+    def getWidth(self):
+        return self.width
 
-	def getHeight(self):
-	    return self.height
+    def getHeight(self):
+        return self.height
 
-	def getResolution(self):
-	    return self.resolution
+    def getResolution(self):
+        return self.resolution
 
-	def getSharpness(self):
-	    return self.sharpness
+    def getSharpness(self):
+        return self.sharpness
 
-	def getBrightness(self):
-	    return self.brightness
+    def getBrightness(self):
+        return self.brightness
 
-	def getContrast(self):
-	    return self.contrast
+    def getContrast(self):
+        return self.contrast
 
-	def getSaturation(self):
-	    return self.saturation
+    def getSaturation(self):
+        return self.saturation
 
-	def getISO(self):
-	    return self.iso
+    def getISO(self):
+        return self.iso
 
-	def setCameraAnnotation(self,annotation):
-	    self.annotation = annotation
+    def setCameraAnnotation(self,annotation):
+        self.annotation = annotation
 
-	def getCameraAnnotation(self):
-	    return self.annotation
+    def getCameraAnnotation(self):
+        return self.annotation
 
-	def getHFlip(self):
-            return self.hflip
+    def getHFlip(self):
+        return self.hflip
 
-        def getVFlip(self):
-            return self.vflip
+    def getVFlip(self):
+        return self.vflip
 
-	def toggleHorizontalFlip(self):
-            if(self.hflip == False):
-                    self.hflip = True
-            else:
-                    self.hflip = False
-            return self.hflip
+    def toggleHorizontalFlip(self):
+        if(self.hflip == False):
+                self.hflip = True
+        else:
+                self.hflip = False
+        return self.hflip
 
-	def toggleVerticalFlip(self):
-            if(self.vflip == False):
-                    self.vflip = True
-            else:
-                    self.vflip = False
-            return self.vflip
+    def toggleVerticalFlip(self):
+        if(self.vflip == False):
+                self.vflip = True
+        else:
+                self.vflip = False
+        return self.vflip
 
 class main:
     def __init__(self):
+        global folder
+        self.folder = folder
 
-        ### Check for, and create the folder ###
-	self.folder = "/home/pi/RFD_Pi_Code/%s/" % strftime("%m%d%Y_%H%M%S")
-	dir = os.path.dirname(self.folder)
-	if not os.path.exists(dir):
-	    os.mkdir(dir)
+        ### Serial Port Initializations ###
+        #RFD900 Serial Variables
+        self.rfdPort  = "/dev/ttyAMA0"
+        self.rfdBaud = 38400
+        self.rfdTimeout = 3
+        self.ser = serial.Serial(port = self.rfdPort,baudrate = self.rfdBaud, timeout = self.rfdTimeout)
 
-	### Serial Port Initializations ###
-	#RFD900 Serial Variables
-	self.rfdPort  = "/dev/ttyAMA0"
-	self.rfdBaud = 38400
-	self.rfdTimeout = 3
-	self.ser = serial.Serial(port = self.rfdPort,baudrate = self.rfdBaud, timeout = self.rfdTimeout)
+        # Arduino Serial Variables
+        self.gpsPort = "/dev/arduino"
+        self.gpsBaud = 115200
+        self.gpsTimeout = 3
 
-	# Arduino Serial Variables
-	self.ardPort = "/dev/arduino"
-	self.ardBaud = 115200
-	self.ardTimeout = 3
+        # XBee Serial Variables
+        self.xPort = "/dev/xbee"
+        self.xBaud = 9600
+        self.xTimeout = 3
 
-	# XBee Serial Variables
-	self.xPort = "/dev/xbee"
-	self.xBaud = 9600
-	self.xTimeout = 3
-
-	self.piCommands = ['1','2','3','4','5','6','7','T','G','P']			# List of pi commands listened for
-		
-        ### Create the logfile ###
-        self.logfile = open(self.folder+"piruntimedata.txt","w")
-        self.logfile.close()
-        self.logfile = open(self.folder+"piruntimedata.txt","a")
+        self.piCommands = ['1','2','3','4','5','6','7','8','G','P','9','0']			# List of pi commands listened for
             
         fh = open(self.folder + "imagedata.txt","w")
         fh.write("")
@@ -130,26 +272,27 @@ class main:
         self.starttime = time.time()
         print "Started at @ ",datetime.datetime.now()
         self.checkpoint = time.time()
+        self.takingPicture = False
+		
+        ### Create queues to share info with the threads
+        self.xbeeToSendQ = Queue.Queue()
+        self.xbeeReceivedQ = Queue.Queue()
+        self.xExceptionsQ = Queue.Queue()
+        self.xResetQ = Queue.Queue()
+        self.gpsQ = Queue.LifoQueue()
+        self.gpsExceptionsQ = Queue.Queue()
+        self.gpsResetQ = Queue.Queue()
+        self.picQ = Queue.Queue()
 
-        ### Set up managers for the data being shared by the processes ###
-        self.xDict = Manager().dict()
-        self.gpsDict = Manager().dict()
-        self.xDict['received'] = []
-        self.xDict['toSend'] = []
-        self.xDict['kill'] = False
-        self.xDict['reset'] = False
-        self.gpsDict['gps'] = []
-        self.gpsDict['kill'] = False
-        self.gpsDict['reset'] = False
-
-        ### Create the side processes for the xBee and GPS ###
-        self.xProc = Process(target = xbeeHandler, args = (self.xPort,self.xBaud,self.xTimeout,self.xDict))
-        self.gpsProc = Process(target = gpsHandler, args = (self.ardPort,self.ardBaud,self.ardTimeout,self.gpsDict))
-        self.xProc.daemon = True
-        self.gpsProc.daemon = True
-        self.xProc.start()
-        self.gpsProc.start()
+        ### Create the GPS and xBee Threads ###
+        self.xThread = XbeeThread("xbeeThread",self.xPort, self.xBaud, self.xTimeout, self.xbeeToSendQ, self.xbeeReceivedQ, self.xExceptionsQ, self.xResetQ)
+        self.xThread.daemon = True
+        self.xThread.start()
+        self.gpsThread = GPSThread("gpsThread",self.gpsPort, self.gpsBaud, self.gpsTimeout, self.gpsQ, self.gpsExceptionsQ, self.gpsResetQ)
+        self.gpsThread.daemon = True
+        self.gpsThread.start()
         
+		
     def getArduinoCom(self):
         return [self.ardPort,self.ardBaud,self.ardTimeout]
 
@@ -230,7 +373,6 @@ class main:
             checkours = self.gen_checksum(outbound,cur)      # Create the checksum to send for the ground station to compare to
             self.ser.write(checkours)
             self.sendword(outbound,cur)                      # Send a piece of size self.wordlength
-            #UpdateDisplay()
             checkOK = self.ser.read()
             if (checkOK == 'Y'):                # This is based on whether or not the word was successfully received based on the checksums
                 cur = cur + self.wordlength
@@ -255,29 +397,24 @@ class main:
     def mostRecentImage(self):
         """ Command 1: Send most recent image """
         self.ser.write('A')      # Send the acknowledge
-##        try:
-        print "Send Image Command Received"
-        #UpdateDisplay()
-        #sync()
-        print "Sending:", self.recentimg
-        self.ser.write(self.recentimg)
-        self.send_image(self.folder+self.recentimg)            # Send the most recent image
-        self.wordlength = 7000                       # Reset the self.wordlength in case it was changed while sending
-##        except:
-##            print "Send Recent Image Error"
+        try:
+            print "Send Image Command Received"
+            print "Sending:", self.recentimg
+            self.ser.write(self.recentimg)
+            self.send_image(self.folder+self.recentimg)            # Send the most recent image
+            self.wordlength = 7000                       # Reset the self.wordlength in case it was changed while sending
+        except:
+            print "Send Recent Image Error"
 
     def sendImageData(self):
     	""" Command 2: Sends imagedata.txt """
         self.ser.write('A')
         try:
             print "data list request recieved"
-            #UpdateDisplay()
-            #sync()
             f = open(self.folder+"imagedata.txt","r")
             print "Sending imagedata.txt"
             for line in f:
                 self.ser.write(line)
-                #print line
             f.close()
             time.sleep(1)
         except:
@@ -288,8 +425,6 @@ class main:
         self.ser.write('A')
         try:
             print"specific photo request recieved"
-            #UpdateDisplay()
-            #sync()
             imagetosend = self.ser.read(15)                  # Determine which picture to send
             print(imagetosend)
             self.send_image(self.folder+imagetosend)
@@ -302,8 +437,6 @@ class main:
         self.ser.write('A')
         try:
             print "Attempting to send camera settings"
-            #UpdateDisplay()
-            #sync()
             camFile = open(self.folder+"camerasettings.txt","r")        # Open the camera settings file
             temp = camFile.read()
             while(temp != ""):      # For every line in the file, send it to the RFD
@@ -321,19 +454,19 @@ class main:
         self.ser.write('A')
         try:
             print "Attempting to update camera settings"
-            #UpdateDisplay()
-            file = open(self.folder+"camerasettings.txt","w")
+            f = open(self.folder+"camerasettings.txt","w")
             temp = self.ser.read()
             while(temp != ""):
-                file.write(temp)
+                f.write(temp)
                 temp = self.ser.read()
-            file.close()
+            f.close()
             print "New Camera Settings Received"
             self.ser.write('A')
-            self.checkpoint = time.time()
+            if(not self.takingPicture):
+                self.checkpoint = time.time()
         except:
             print "Error Retrieving Camera Settings"
-            reset_cam
+            self.reset_cam()
 
     def timeSync(self):
     	""" Sends the current time """
@@ -351,7 +484,6 @@ class main:
     	""" Connection test, test ping time """
         self.ser.write('A')
         print "Ping Request Received"
-        #UpdateDisplay()
         try:
             print "test"
             termtime = time.time() + 10
@@ -394,212 +526,163 @@ class main:
         self.ser.write('A')
         try:
             print "Attempting to send piruntimedata"
-            #UpdateDisplay()
-            #sync()
-            file = open(self.folder+"piruntimedata.txt","r")     # Open the runtimedata file
-            temp = file.readline()
+            f = open(self.folder+"piruntimedata.txt","r")     # Open the runtimedata file
+            temp = f.readline()
             while(temp != ""):      # Send everyting in the file until it's empty
                 self.ser.write(temp)
-                temp = file.readline()
-            #ser.write("\r")
-            file.close()
+                temp = f.readline()
+            f.close()
             print "piruntimedata.txt sent"
         except:
             print "error sending piruntimedata.txt"
 
-    def takePicture(self):
-    	""" Takes a picture at full resolution, and one at the selected resolution """
-    	try:
-            camera = picamera.PiCamera()
-            # Get the camera settings
-            f = open(self.folder+"camerasettings.txt","r")
-            width = int(f.readline())
-            height = int(f.readline())
-            sharpness = int(f.readline())
-            brightness = int(f.readline())
-            contrast = int(f.readline())
-            saturation = int(f.readline())
-            iso = int(f.readline())
-            f.close()
-            print "Camera Settings Read"
-            
-        except:
-            print "cannot open file/file does not exist"
-            self.reset_cam()     # Reset the camera if there's an issue
-            
+    def horizontalFlip(self):
+        """ Flips the pictures horizontally """
+        self.ser.write('A')
         try:
-            # Setup the camera with the settings read previously
-            camera.sharpness = sharpness
-            camera.brightness = brightness
-            camera.contrast = contrast
-            camera.saturation = saturation
-            camera.iso = iso
+            self.cameraSettings.toggleHorizontalFlip()
+            print("Camera Flipped Horizontally")
+        except:
+            print("Error flipping image horizontally")
 
-            camera.resolution = (2592,1944)             # Default max resolution photo
-            extension = '.png'
-            camera.hflip = self.cameraSettings.getHFlip()
-            camera.vflip = self.cameraSettings.getVFlip()
-
-            camera.capture(self.folder+"%s%04d%s" %("image",self.imagenumber,"_a"+extension))     # Take the higher resolution picture
-            print "( 2592 , 1944 ) photo saved"
-
-            fh = open(self.folder+"imagedata.txt","a")
-            fh.write("%s%04d%s @ time(%s) settings(w=%d,h=%d,sh=%d,b=%d,c=%d,sa=%d,i=%d)\n" % ("image",self.imagenumber,"_a"+extension,str(datetime.datetime.now().strftime("%m/%d/%Y %H:%M:%S")),2592,1944,sharpness,brightness,contrast,saturation,iso))       # Add it to imagedata.txt
-            camera.resolution = (width,height)          # Switch the resolution to the one set by the ground station
-            extension = '.jpg'
-
-            camera.capture(self.folder+"%s%04d%s" %("image",self.imagenumber,"_b"+extension))     # Take the lower resolution picture
-            print "(",width,",",height,") photo saved"
-            fh.write("%s%04d%s @ time(%s) settings(w=%d,h=%d,sh=%d,b=%d,c=%d,sa=%d,i=%d)\n" % ("image",self.imagenumber,"_b"+extension,str(datetime.datetime.now().strftime("%m/%d/%Y %H:%M:%S")),width,height,sharpness,brightness,contrast,saturation,iso))       # Add it to imagedata.txt
-            print "settings file updated"
-            camera.close()
-            self.recentimg = "%s%04d%s" %("image",self.imagenumber,"_b"+extension)            # Make this photo the most recent image taken
-            fh.close()
-            print "Most Recent Image Saved as", self.recentimg
-            self.imagenumber += 1
-            self.checkpoint = time.time() + self.pic_interval         # Reset the checkpoint so it will be another minute before the next picture
-        except:                                         # If there's any errors while taking the picture, reset the checkpoint
-            print("Error taking picture")
-            self.checkpoint = time.time() + self.pic_interval
+    def verticalFlip(self):
+        """ Flips the pictures vertically """
+        self.ser.write('A')
+        try:
+            self.cameraSettings.toggleVerticalFlip()
+            print("Camera Flipped Vertically")
+        except:
+            print("Error flipping image vertically")
 
     def loop(self):
+        """ The main loop for the program """
     	try:
-            print("RT:",int(time.time() - self.starttime),"Watching Serial")
+            ### Receive a command from the ground station ###
+            print("RT: "+ str(int(time.time() - self.starttime)) + " Watching Serial")
             timeCheck = time.time()
             command = ''
             done = False
             while((not done) and (time.time() - timeCheck) < 3):
-                    newChar = self.ser.read()
-                    if((newChar in self.piCommands) and (len(command) == 0)):
-                            command = newChar
-                            done = True
-                    elif(newChar == "!"):
-                            command += newChar
-                            done = True
-                    elif(newChar != ""):
-                            command += newChar
-                            timeCheck = time.time()
-
-            if(command != ''):
-                    print("Command: ",command)
-
-            if(command == '1'):
-                    self.mostRecentImage()
-            elif(command == '2'):
-                    self.sendImageData()
-            elif(command == '3'):
-                    self.requestedImage()
-            elif(command == '4'):
-                    self.sendCameraSettings()
-            elif(command == '5'):
-                    self.getCameraSettings()
-            elif(command == '6'):
-                    self.pingTest()
-            elif(command == '7'):
-                    self.sendPiRuntime()
-            elif(command == 'T'):
-                    self.timeSync()
-            elif(command == 'P'):
-                    self.sendPing()
-
-            else:
-                lst = self.xDict['toSend']
-                lst.append(command)
-                self.xDict['toSend'] = lst
-                if command == '':       # If no command was received, get a GPS update and send it out
-                    if(len(self.gpsDict['gps'])>0):
-                        self.ser.write("GPS:"+self.gpsDict['gps'][-1])
-                for each in self.xDict['received']:       # Send out everything that the xbee received since the last loop
-                    self.ser.write(each)
-                self.xDict['received'] = []           # Clear the xbee list after sending everything
-                self.ser.flushInput()            # Clear the input buffer so we're ready for a new command to be received
-
-            if(self.checkpoint < time.time()):
-                self.takePicture()
-
-            self.ser.flushInput()
-
-            if(self.xDict['reset'] == True):
-                self.xProc = Process(target = xbeeHandler, args = (self.xPort,self.xBaud,self.xTimeout,self.xDict))
-                self.xDict['reset'] = False
-                self.xProc.daemon = True
-                self.xProc.start()
-
-            if(self.gpsDict['reset'] == True):
-                self.gpsProc = Process(target = gpsHandler, args = (self.ardPort,self.ardBaud,self.ardTimeout,self.gpsDict))
-                self.gpsDict['reset'] = False
-                self.gpsProc.daemon = True
-                self.gpsProc.start()
-                
-        except KeyboardInterrupt:
-                self.xDict['kill'] = True
-                self.gpsDict['kill'] = True
-                quit()
-
-def xbeeHandler(xPort,xBaud,xTimeout,xDict):
-    xbee = serial.Serial(port = xPort, baudrate = xBaud, timeout = xTimeout)      # Open the xbee port first thing
-    while(not xDict['kill']):         # Run this code forever
-        try:
-            line = ''
-            done = False
-            timeCheck = time.time()
-            while((not done) and (time.time() - timeCheck) < 1):
-                newChar = xbee.read()
-                print(newChar)
-                if(newChar == "!"):
-                    line += newChar
+                newChar = self.ser.read()
+                if((newChar in self.piCommands) and (len(command) == 0)):
+                    command = newChar
+                    done = True
+                elif(newChar == "!"):
+                    command += newChar
                     done = True
                 elif(newChar != ""):
-                    line += newChar
+                    command += newChar
                     timeCheck = time.time()
 
-            if line not in xDict['received']:        # We don't want to fill it with the same piece of data over and over again while we wait for the RFD to send it out
-            	lst = xDict['received']
-            	lst.append(line)
-            	xDict['received'] = lst
-            for each in xDict['toSend']:             # For everything added in the other thread, send them all out
-                xbee.write(each)
-            xDict['toSend'] = []                   # Clear the send list once everything is sent
-        except:         # This catches unexpected errors in the thread, and makes sure that the thread will start up again next loop
-            xDict['reset'] = True
-            xbee.close()
+            if(command != ''):
+                print("Command: ",command)
 
-def gpsHandler(ardPort,ardBaud,ardTimeout,gpsDict):
-    ardSer = serial.Serial(port = ardPort, baudrate = ardBaud, timeout = ardTimeout)    # Open the xbee port first thing
-    while(not gpsDict['kill']):         # Run this code forever
-        try:
-            line = ardSer.readline()
-            if(line.find("GPGGA") != -1):
-                prev = line[1].split('.')[0]
-                line = line.split(',')
-                hours = int(line[1][0:2])
-                minutes = int(line[1][2:4])
-                seconds = int(line[1][4:].split('.')[0])
-                if(line[2] == ''):
-                    lat = 0
-                else:
-                    lat = float(line[2][0:2]) + (float(line[2][3:]))/60
-                if(line[3] == ''):
-                    lon = 0
-                else:
-                    lon = float(line[4][0:3]) + (float(line[4][4:]))/60
-                if(line[9] == ''):
-                    alt = 0
-                else:
-                    alt = float(line[7])
-                sat = int(line[7])
-                gpsStr = str(hours)+','+ str(minutes)+','+ str(seconds)+','+ str(lat)+','+str(lon)+','+str(alt)+','+str(sat)+'!'+'\n'
+            ### Check to see if the command was one for the raspberry pi ###
+            if(command == '1'):
+                self.mostRecentImage()
+            elif(command == '2'):
+                self.sendImageData()
+            elif(command == '3'):
+                self.requestedImage()
+            elif(command == '4'):
+                self.sendCameraSettings()
+            elif(command == '5'):
+                self.getCameraSettings()
+            elif(command == '6'):
+                self.pingTest()
+            elif(command == '7'):
+                self.sendPiRuntime()
+            elif(command == '8'):
+                self.timeSync()
+            elif(command == 'P'):
+                self.sendPing()
+            elif(command == '0'):
+                self.verticalFlip()
+                self.ser.flushInput()
+            elif(command == '9'):
+                self.horizontalFlip()
+                self.ser.flushInput()
+
+            ### If it's not a command for the raspberry pi, send it out the xbee ###
+            else:
+                self.xbeeToSendQ.put(command)      # Adds the command to the xbee send list so the xbee thread can send it out      
+
+                # If there was no command received, send a GPS update through the RFD
+                if command == '':
+                    if(not self.gpsQ.empty()):
+                        gps = "GPS:" + str(self.gpsQ.get())
+                        self.ser.write(gps)
+                        while(not self.gpsQ.empty()):
+                            self.gpsQ.get()
+
+                # Send out everything the xbee received
+                while(not self.xbeeReceivedQ.empty()):
+                    self.ser.write(self.xbeeReceivedQ.get())
+
+            ### Check to make sure the side threads are still running ###
+            if(not self.xResetQ.empty()):
+                xThread.start()
+                while(not self.xResetQ.empty()):
+                    self.xResetQ.get()
+            if(not self.gpsResetQ.empty()):
+                gpsThread.start()
+                while(not self.gpsResetQ.empty()):
+                    self.gpsResetQ.get()
+
+            ### Periodically take a picture ###
+            if(self.checkpoint < time.time() and not self.takingPicture):			# Take a picture periodically
+                print("Taking Picture")
+                self.takingPicture = True
+                self.picThread = TakePicture("Picture Thread",self.cameraSettings, self.folder,self.imagenumber,self.picQ)
+                self.picThread.daemon = True
+                self.picThread.start()
                 
-                lst = gpsDict['gps']
-                lst.append(gpsStr)
-                gpsDict['gps'] = lst
-        except:         # This catches unexpected errors in the thread, and makes sure that the thread will start up again next loop
-            gpsDict['reset'] = True
-            ardSer.close()
+            ### Check for picture stuff ###
+            if(not self.picQ.empty()):
+                if(self.picQ.get() == 'done'):                      # Command to reset the recentimg and increment the pic number (pic successfully taken)
+                    self.recentimg = "%s%04d%s" %("image",self.imagenumber,"_b.jpg")
+                    self.imagenumber += 1
+                    self.takingPicture = False
+                    self.checkpoint = time.time() + self.pic_interval
+                elif(self.picQ.get() == 'reset'):                   # Command to reset the camera
+                    self.takingPicture = False
+                    self.reset_cam()
+                elif(self.picQ.get() == 'checkpoint'):              # Command to reset the checkpoint
+                    self.takingPicture = False
+                    self.checkpoint = time.time() + self.pic_interval
+                else:
+                    while(not self.picQ.empty()):
+                        print(self.picQ.get())
+
+            self.ser.flushInput()       # Clear the input buffer so we're ready for a new command to be received
+            
+            ### Print out any exceptions that the threads have experienced ###
+            while(not self.gpsExceptionsQ.empty()):
+                print(self.gpsExceptionsQ.get())
+            while(not self.xExceptionsQ.empty()):
+                print(self.xExceptionsQ.get())
+				
+        except Exception, e:            # Print any exceptions from the main loop
+            print(str(e))
+                
+        except KeyboardInterrupt:       # For debugging pruposes, close the RFD port and quit if you get a keyboard interrupt
+            self.ser.close()
+            quit()
 
 if __name__ == "__main__":
-	##sys.stdout = Unbuffered(sys.stdout)
-	mainLoop = main()
-	while True:
-		mainLoop.loop()
+    ### Check for, and create the folder ###
+    folder = "/home/pi/RFD_Pi_Code/%s/" % strftime("%m%d%Y_%H%M%S")
+    dir = os.path.dirname(folder)
+    if not os.path.exists(dir):
+            os.mkdir(dir)
+
+    ### Create the logfile ###
+    logfile = open(folder+"piruntimedata.txt","w")
+    logfile.close()
+    logfile = open(folder+"piruntimedata.txt","a")
+
+    sys.stdout = Unbuffered(sys.stdout)         # All print statements are written to the logfile
+    mainLoop = main()
+    while True:
+        mainLoop.loop()
 

@@ -8,7 +8,7 @@ The commandReady file is a multithreaded application for the raspberry pi that t
 
 If it is not a recognized single byte command, the information is sent directly through the xbee radio to other nearby receiving units.
 
-The Still Images and Command Relay file takes advantage of the python multiprocessing library to handle the xbee, gps, and mainloop simultaneously. Set up the same way as the commandReady program, but takes raw GPS instead.
+The Still Images and Command Relay file is also multithreaded, but handles raw GPS input, allowing for a Adafruit GPS module to be directly connected to the Pi via a USB-to-TTL cable. Picture taking is also handled in a side thread, so communication can happen even while a picture is being taken.
 
 ## Using this code:
 Load this code onto a raspberry pi, and set it to run on startup by editting the crontab. Connect the RFD900 to the Rx and Tx pins, connect the xbee through USB, and the arduino through USB.

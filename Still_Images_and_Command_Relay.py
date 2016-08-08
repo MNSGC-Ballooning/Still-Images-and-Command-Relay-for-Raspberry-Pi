@@ -27,7 +27,7 @@ class GPSThread(threading.Thread):
         while True:					# Run forever
             try:
                 line = ardSer.readline()
-                if(line.find("GPGGA") != -1):							# GPGGA indicates it's the GPS stuff we're looking for
+                if(line.find("GPGGA") != -1):		# GPGGA indicates it's the GPS stuff we're looking for
                     try:
                         ### Parse the GPS Info ###
                         prev = line[1].split('.')[0]
@@ -56,48 +56,54 @@ class GPSThread(threading.Thread):
                     except Exception,e:
                         self.exceptionsQ.put(str(e))
                         
-            ### Catches unexpected errors, restarts the thread ###
+            ### Catches unexpected errors ###
             except Exception, e:
                 self.exceptionsQ.put(str(e))
                 self.resetFlagQ.put('gpsThread dead')
-                ardSer.close()
-                
-class XbeeThread(threading.Thread):
-    """ A thread to read and write to the xbee radio in parallel with the main thread """
-    def __init__(self,threadID,port,baud,timeout,xbeeToSend,xbeeReceived, exceptions, resetFlag):        # Constructor
+                ardSer.close()          
+
+class XbeeReceiveThread(threading.Thread):
+    """ A thread to read information from the xbee, and send it to the main thread """
+    def __init__(self,threadID, xbee, xbeeReceived, exceptions, resetFlag):         # Constructor
         threading.Thread.__init__(self)
         self.threadID = threadID
-        self.port = port
-        self.baud = baud
-        self.timeout = timeout
-        self.sendQ = xbeeToSend
+        self.xbee = xbee
         self.receivedQ = xbeeReceived
         self.exceptionsQ = exceptions
         self.resetFlagQ = resetFlag
-    
-    def run(self):                      # Thread loop
-        xbee = serial.Serial(port = self.port, baudrate = self.baud, timeout = self.timeout)    # Open the xbee port first thing
-        lastEntry = ''
-        while True:         # Run this code forever
+
+    def run(self):
+        while True:
             try:
-                line = xbee.readline()							# Read from the xbee
-                if(line != lastEntry):						# If it's a new line, add it to the queue
-                    try:
-                        self.receivedQ.put(line)
-                    except Exception, e:
-                        self.exceptionsQ.put(str(e))
-                                
-                while(not self.sendQ.empty()):				# If there's stuff to send, send it, then clear the queue
-                    try:
-                        xbee.write(self.sendQ.get())
-                        
-                    except Exception, e:
-                            self.exceptionsQ.put(str(e))
-                                            
-            except Exception, e:         			# This catches unexpected errors in the thread, and makes sure that the thread will start up again next loop
+                line = self.xbee.readline()         # Read a line from the xbee
+                try:
+                    self.receivedQ.put(line)        # Put the information in the receivedQ
+                except Exception, e:
+                    self.exceptionsQ.put(str(e))
+                    
+            except Exception, e:                    # Catch any unexpected error, and notify the main thread of them
                 self.exceptionsQ.put(str(e))
-                self.resetFlagQ.put('xThread dead')
-                xbee.close()
+                self.resetFlagQ.put('reset')
+
+class XbeeSendThread(threading.Thread):
+    """ A Thread to send information out through the xbee radio """
+    def __init__(self,threadID, xbee, xbeeToSend,exceptions,resetFlag):         # Constructor
+        threading.Thread.__init__(self)
+        self.threadID = threadID
+        self.xbee = xbee
+        self.sendQ = xbeeToSend
+        self.exceptionsQ = exceptions
+        self.resetFlagQ = resetFlag
+
+    def run(self):
+        while True:
+            try:
+                while(not self.sendQ.empty()):              # If there are items in the sendQ, send them out the xbee
+                    self.xbee.write(self.sendQ.get())
+                    
+            except Exception, e:                            # Catch any unexpected error, and notify the main thread of them
+                self.exceptionsQ.put(str(e))
+                self.resetFlagQ.put('reset')
                 
 class TakePicture(threading.Thread):
     
@@ -128,7 +134,10 @@ class TakePicture(threading.Thread):
         except:
             print "cannot open file/file does not exist"
             self.q.put('reset')                     # Instruct the main loop to reset the camera if there's an issue with the file
-            
+            try:
+                f.close()
+            except:
+                pass
         try:
             # Setup the camera with the settings read previously
             camera.sharpness = sharpness
@@ -153,12 +162,17 @@ class TakePicture(threading.Thread):
             print "(",width,",",height,") photo saved"
             fh.write("%s%04d%s @ time(%s) settings(w=%d,h=%d,sh=%d,b=%d,c=%d,sa=%d,i=%d)\n" % ("image",self.imagenumber,"_b"+extension,str(datetime.datetime.now().strftime("%m/%d/%Y %H:%M:%S")),width,height,sharpness,brightness,contrast,saturation,iso))       # Add it to imagedata.txt
             print "settings file updated"
-            camera.close()
-            fh.close()
             self.q.put('done')
         except:                                         # If there's any errors while taking the picture, reset the checkpoint
             print("Error taking picture")
             self.q.put('checkpoint')
+
+        finally:
+            try:
+                camera.close()
+                fh.close()
+            except:
+                pass
 
 class Unbuffered:
     """ Helps eliminate the serial buffer, also logs all print statements to the logfile """
@@ -255,9 +269,10 @@ class main:
         self.xPort = "/dev/xbee"
         self.xBaud = 9600
         self.xTimeout = 3
-
-        self.piCommands = ['1','2','3','4','5','6','7','8','G','P','9','0']			# List of pi commands listened for
-            
+        
+        # List of pi commands listened so that they can be recognized more quickly
+        self.piCommands = ['1','2','3','4','5','6','7','8','~','9','0']
+        
         fh = open(self.folder + "imagedata.txt","w")
         fh.write("")
         fh.close()
@@ -275,19 +290,25 @@ class main:
         self.takingPicture = False
 		
         ### Create queues to share info with the threads
-        self.xbeeToSendQ = Queue.Queue()
-        self.xbeeReceivedQ = Queue.Queue()
-        self.xExceptionsQ = Queue.Queue()
-        self.xResetQ = Queue.Queue()
+        self.xSendQ = Queue.Queue()
+        self.xReceivedQ = Queue.Queue()
+        self.xReceivedExceptionsQ = Queue.Queue()
+        self.xSendExceptionsQ = Queue.Queue()
+        self.xReceivedResetQ = Queue.Queue()
+        self.xSendResetQ = Queue.Queue()
         self.gpsQ = Queue.LifoQueue()
         self.gpsExceptionsQ = Queue.Queue()
         self.gpsResetQ = Queue.Queue()
         self.picQ = Queue.Queue()
 
         ### Create the GPS and xBee Threads ###
-        self.xThread = XbeeThread("xbeeThread",self.xPort, self.xBaud, self.xTimeout, self.xbeeToSendQ, self.xbeeReceivedQ, self.xExceptionsQ, self.xResetQ)
-        self.xThread.daemon = True
-        self.xThread.start()
+        self.xbee = serial.Serial(port = self.xPort, baudrate = self.xBaud, timeout = self.xTimeout)
+        self.xReceiveThread = XbeeReceiveThread("xbeeReceivedThread",self.xbee, self.xReceivedQ, self.xReceivedExceptionsQ, self.xReceivedResetQ)
+        self.xReceiveThread.daemon = True
+        self.xReceiveThread.start()
+        self.xSendThread = XbeeSendThread("xbeeSendThread", self.xbee, self.xSendQ, self.xSendExceptionsQ, self.xSendResetQ)
+        self.xSendThread.daemon = True
+        self.xSendThread.start()
         self.gpsThread = GPSThread("gpsThread",self.gpsPort, self.gpsBaud, self.gpsTimeout, self.gpsQ, self.gpsExceptionsQ, self.gpsResetQ)
         self.gpsThread.daemon = True
         self.gpsThread.start()
@@ -489,10 +510,10 @@ class main:
             termtime = time.time() + 10
             pingread = self.ser.read()
             while ((pingread != 'D') &(pingread != "") & (termtime > time.time())):     # Look for the stop character D, no new info, or too much time passing
-                if (pingread == 'P'):       # Whenever you get the P, send one back and get ready for another
+                if (pingread == '~'):       # Whenever you get the P, send one back and get ready for another
                     print "Ping Received"
                     self.ser.flushInput()
-                    self.ser.write('P')
+                    self.ser.write('~')
                 else:                       # If you don't get the P, sne back an A instead
                     print "pingread = ",pingread
                     self.ser.flushInput()
@@ -508,10 +529,10 @@ class main:
             termtime = time.time() + 10
             pingread = self.ser.read()
             while ((pingread != 'D') &(pingread != "") & (termtime > time.time())):     # Look for the stop character D, no new info, or too much time passing
-                if (pingread == 'P'):       # Whenever you get the P, send one back and get ready for another
+                if (pingread == '~'):       # Whenever you get the P, send one back and get ready for another
                     print "Ping Received"
                     self.ser.flushInput()
-                    self.ser.write('P')
+                    self.ser.write('~')
                 else:                       # If you don't get the P, sne back an A instead
                     print "pingread = ",pingread
                     self.ser.flushInput()
@@ -554,6 +575,36 @@ class main:
         except:
             print("Error flipping image vertically")
 
+    def checkSideThreads(self):
+        """ Check to make sure the side threads are still running """
+        # If either of the xbee threads need to be reset, reset them both, and recreate the xbee object just to make sure that the xbee wasn't the issue
+        if((not self.xReceivedResetQ.empty()) or (not self.xSendResetQ.empty())):
+            try:
+                self.xbee.close()       # Try to close the xbee
+            except:
+                pass
+            self.xbee = serial.Serial(port = self.xPort, baudrate = self.xBaud, timeout = self.xTimeout)        # Reopen the xbee
+            # Restart the threads
+            self.xReceiveThread = XbeeReceiveThread("xbeeReceivedThread",self.xbee, self.xReceivedQ, self.xReceivedExceptionsQ, self.xReceivedResetQ)
+            self.xReceiveThread.daemon = True
+            self.xReceiveThread.start()
+            self.xSendThread = XbeeSendThread("xbeeSendThread", self.xbee, self.xSendQ, self.xSendExceptionsQ, self.xSendResetQ)
+            self.xSendThread.daemon = True
+            self.xSendThread.start()
+            # Empty the reset Qs
+            while(not self.xReceivedResetQ.empty()):
+                self.xReceivedResetQ.get()
+            while(not self.xSendResetQ.empty()):
+                self.xSendResetQ.get()
+        # If the gps thread needs to be reset, just do it
+        if(not self.gpsResetQ.empty()):
+            self.gpsThread = GPSThread("gpsThread",self.gpsPort, self.gpsBaud, self.gpsTimeout, self.gpsQ, self.gpsExceptionsQ, self.gpsResetQ)
+            self.gpsThread.daemon = True
+            self.gpsThread.start()
+            # Clear the gps reset Q
+            while(not self.gpsResetQ.empty()):
+                self.gpsResetQ.get()
+
     def loop(self):
         """ The main loop for the program """
     	try:
@@ -594,18 +645,18 @@ class main:
                 self.sendPiRuntime()
             elif(command == '8'):
                 self.timeSync()
-            elif(command == 'P'):
-                self.sendPing()
-            elif(command == '0'):
-                self.verticalFlip()
-                self.ser.flushInput()
             elif(command == '9'):
                 self.horizontalFlip()
                 self.ser.flushInput()
+            elif(command == '0'):
+                self.verticalFlip()
+                self.ser.flushInput()
+            elif(command == '~'):
+                self.sendPing()
 
             ### If it's not a command for the raspberry pi, send it out the xbee ###
             else:
-                self.xbeeToSendQ.put(command)      # Adds the command to the xbee send list so the xbee thread can send it out      
+                self.xSendQ.put(command)      # Adds the command to the xbee send list so the xbee thread can send it out      
 
                 # If there was no command received, send a GPS update through the RFD
                 if command == '':
@@ -616,18 +667,10 @@ class main:
                             self.gpsQ.get()
 
                 # Send out everything the xbee received
-                while(not self.xbeeReceivedQ.empty()):
-                    self.ser.write(self.xbeeReceivedQ.get())
+                while(not self.xReceivedQ.empty()):
+                    self.ser.write(self.xReceivedQ.get())
 
-            ### Check to make sure the side threads are still running ###
-            if(not self.xResetQ.empty()):
-                xThread.start()
-                while(not self.xResetQ.empty()):
-                    self.xResetQ.get()
-            if(not self.gpsResetQ.empty()):
-                gpsThread.start()
-                while(not self.gpsResetQ.empty()):
-                    self.gpsResetQ.get()
+            self.checkSideThreads()             # Make sure the side threads are still going strong
 
             ### Periodically take a picture ###
             if(self.checkpoint < time.time() and not self.takingPicture):			# Take a picture periodically
@@ -659,9 +702,11 @@ class main:
             ### Print out any exceptions that the threads have experienced ###
             while(not self.gpsExceptionsQ.empty()):
                 print(self.gpsExceptionsQ.get())
-            while(not self.xExceptionsQ.empty()):
-                print(self.xExceptionsQ.get())
-				
+            while(not self.xReceivedExceptionsQ.empty()):
+                print(self.xReceivedExceptionsQ.get())
+            while(not self.xSendExceptionsQ.empty()):
+                print(self.xSendExceptionsQ.get())
+            			
         except Exception, e:            # Print any exceptions from the main loop
             print(str(e))
                 

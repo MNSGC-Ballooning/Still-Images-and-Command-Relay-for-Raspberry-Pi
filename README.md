@@ -1,4 +1,4 @@
-# Xbee-Relay-and-Still-Images-for-Raspberry-Pi
+# Still-Images-and-Command-Relay-for-Raspberry-Pi
 By Austin Langford, based on work from MSU-BOREALIS
 
 

@@ -1,3 +1,14 @@
+#################################################################################################################################
+#   Still Images and Command Relay for Raspberry Pi with Xbee and RFD 900+                                                      #
+#                                                                                                                               #
+#   Author:  Austin Langford, AEM, MnSGC                                                                                        #
+#   Based on work from the Montana Space Grant Consortium                                                                       #
+#   Software created for use by the Minnesota Space Grant Consortium                                                            #
+#   Purpose: To communicate with a ground transceiver to receive commands, relay them through the xbee, and to send images      #                                                       #
+#   Creation Date: July 2016                                                                                                    #
+#   Last Edit Date: August 19, 2016                                                                                             #
+#################################################################################################################################
+
 import time
 import threading, Queue
 from time import strftime
@@ -23,10 +34,10 @@ class GPSThread(threading.Thread):
         self.resetFlagQ = resetFlag
 
     def run(self):
-        ardSer = serial.Serial(port = self.port, baudrate = self.baud, timeout = self.timeout)
+        gpsSer = serial.Serial(port = self.port, baudrate = self.baud, timeout = self.timeout)
         while True:					# Run forever
             try:
-                line = ardSer.readline()
+                line = gpsSer.readline()
                 if(line.find("GPGGA") != -1):		# GPGGA indicates it's the GPS stuff we're looking for
                     try:
                         ### Parse the GPS Info ###
@@ -38,15 +49,15 @@ class GPSThread(threading.Thread):
                         if(line[2] == ''):
                             lat = 0
                         else:
-                            lat = float(line[2][0:2]) + (float(line[2][3:]))/60
-                        if(line[3] == ''):
+                            lat = float(line[2][0:2]) + (float(line[2][2:]))/60
+                        if(line[4] == ''):
                             lon = 0
                         else:
-                            lon = float(line[4][0:3]) + (float(line[4][4:]))/60
+                            lon = -(float(line[4][0:3]) + (float(line[4][3:]))/60)
                         if(line[9] == ''):
                             alt = 0
                         else:
-                            alt = float(line[7])
+                            alt = float(line[9])
                         sat = int(line[7])
                         
                         ### Organize the GPS info, and put it in the queue ###
@@ -60,7 +71,7 @@ class GPSThread(threading.Thread):
             except Exception, e:
                 self.exceptionsQ.put(str(e))
                 self.resetFlagQ.put('gpsThread dead')
-                ardSer.close()          
+                gpsSer.close()          
 
 class XbeeReceiveThread(threading.Thread):
     """ A thread to read information from the xbee, and send it to the main thread """
@@ -106,7 +117,7 @@ class XbeeSendThread(threading.Thread):
                 self.resetFlagQ.put('reset')
                 
 class TakePicture(threading.Thread):
-    
+    """ Thread to take two pictures, one at full resolution, the other at the selected resolution """
     def __init__(self, threadID, cameraSettings,folder,imagenumber,picQ):        # Constructor
         threading.Thread.__init__(self)
         self.threadID = threadID
@@ -249,6 +260,7 @@ class CameraSettings:
         return self.vflip
 
 class main:
+    """ The main program class """
     def __init__(self):
         global folder
         self.folder = folder
@@ -260,13 +272,13 @@ class main:
         self.rfdTimeout = 3
         self.ser = serial.Serial(port = self.rfdPort,baudrate = self.rfdBaud, timeout = self.rfdTimeout)
 
-        # Arduino Serial Variables
-        self.gpsPort = "/dev/arduino"
+        # GPS Serial Variables
+        self.gpsPort = "/dev/gps"           # You'll need to set up your GPS so that it can be reached by this name (http://unix.stackexchange.com/questions/66901/how-to-bind-usb-device-under-a-static-name)
         self.gpsBaud = 115200
         self.gpsTimeout = 3
 
         # XBee Serial Variables
-        self.xPort = "/dev/xbee"
+        self.xPort = "/dev/xbee"            # You'll need to set up your Xbee so that it can be reached by this name (http://unix.stackexchange.com/questions/66901/how-to-bind-usb-device-under-a-static-name)
         self.xBaud = 9600
         self.xTimeout = 3
         
@@ -314,8 +326,8 @@ class main:
         self.gpsThread.start()
         
 		
-    def getArduinoCom(self):
-        return [self.ardPort,self.ardBaud,self.ardTimeout]
+    def getGPSCom(self):
+        return [self.gpsPort,self.gpsBaud,self.gpsTimeout]
 
     def getXbeeCom(self):
         return [self.xPort,self.xBaud,self.xTimeout]
@@ -524,6 +536,7 @@ class main:
             print "Ping Runtime Error"
 
     def sendPing(self):
+        """ Sends a Ping when requested """
         try:
             print "test"
             termtime = time.time() + 10
@@ -715,7 +728,7 @@ class main:
             quit()
 
 if __name__ == "__main__":
-    ### Check for, and create the folder ###
+    ### Check for, and create the folder for this flight ###
     folder = "/home/pi/RFD_Pi_Code/%s/" % strftime("%m%d%Y_%H%M%S")
     dir = os.path.dirname(folder)
     if not os.path.exists(dir):

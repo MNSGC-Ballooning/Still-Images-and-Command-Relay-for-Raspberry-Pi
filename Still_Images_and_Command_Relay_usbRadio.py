@@ -1,13 +1,14 @@
-#################################################################################################################################
-#   Still Images and Command Relay for Raspberry Pi with Xbee and RFD 900+                                                      #
-#                                                                                                                               #
-#   Author:  Austin Langford, AEM, MnSGC                                                                                        #
-#   Based on work from the Montana Space Grant Consortium                                                                       #
-#   Software created for use by the Minnesota Space Grant Consortium                                                            #
-#   Purpose: To communicate with a ground transceiver to receive commands, relay them through the xbee, and to send images      #                                                       #
-#   Creation Date: July 2016                                                                                                    #
-#   Last Edit Date: September 8, 2016                                                                                           #
-#################################################################################################################################
+#!/usr/bin/env python
+"""
+Still Images and Command Relay for Raspberry Pi with Xbee and RFD 900+ 
+
+Author:	Austin Langford, AEM, MnSGC
+Based on work from the Montana Space Grant Consortium
+Software created for use by the Minnesota Space Grant Consortium
+Purpose: To communicate with a ground transceiver to receive commands, and relay them through the xbee                                                    #
+Additional Features: GPS beacon and Image Transmission
+Creation Date: March 2016
+"""
 
 import time
 import threading, Queue
@@ -496,11 +497,9 @@ class main:
     def sendword(self,data,pos):
         """ Sends the appropriately sized piece of the total picture encoding """
         if(pos + self.wordlength < len(data)):       # Take a piece of size self.wordlength from the whole, and send it
-##            for x in range(pos, pos+self.wordlength):
             self.ser.write(data[pos:pos+self.wordlength])
             return
         else:                                   # If the self.wordlength is greater than the amount remaining, send everything left
-##            for x in range(pos, len(data)):
             self.ser.write(data[pos:pos+len(data)])
             return
 
@@ -585,7 +584,7 @@ class main:
             print "Error with imagedata.txt read or send"
 
     def requestedImage(self):
-        """ Command 3: Sends the requested image """
+        """ Sends the requested image """
         self.ser.write('A')
         try:
             print"specific photo request recieved"
@@ -604,7 +603,7 @@ class main:
             print str(e)
 
     def sendCameraSettings(self):
-        """ Command 4: Sends the camera settings """
+        """ Sends the camera settings """
         self.ser.write('Ack\n')
         try:
             print "Attempting to send camera settings"
@@ -649,34 +648,6 @@ class main:
                     print "Camera Settings Updated"
                     self.ser.write('Ack2\n')
                     self.ser.reset_input_buffer()
-                    
-##            temp = self.ser.read()
-##            while temp == '5':
-##                self.ser.write('A')
-##                temp = self.ser.read()
-
-##            done = False
-##            while not done:
-##                settings = self.ser.readline()
-##                if settings[0] == 'A':
-##                    settings = settings.replace('A','')
-##                    settingsLst = settings.split(',')
-##                    if len(settingsLst) == 7:
-##                        fail = False
-##                        for each in settingsLst:
-##                            try:
-##                                each = int(each)
-##                            except:
-##                                fail = True
-##                        if fail == False:
-##                            self.cameraSettings.newSettings(settingsLst)
-##                            done = True
-##                            self.ser.write('B')
-##                if time.time() > termtime:
-##                    done = True
-##            temp = self.ser.read()
-##            while temp != '':
-##                temp = self.ser.read()
                     
         except Exception, e:
             print str(e)
@@ -955,7 +926,7 @@ class main:
                     if(not self.tempQ.empty()):
                         self.recentTemp = str(self.tempQ.get())
                         print("Temperature: "+self.recentTemp)
-                        while(not self.tempQ.empty()):
+                        while(not self.tempQ.empty()):gpsExceptionsQ
                             self.tempQ.get()
                 else:
                     self.recentTemp = "False"

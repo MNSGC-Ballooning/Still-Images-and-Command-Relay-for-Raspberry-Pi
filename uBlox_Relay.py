@@ -47,7 +47,7 @@ class GPSThread(threading.Thread):
                    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x4C,0xBA]
         response = []
         acknowledge = [0xB5, 0x62, 0x05, 0x01, 0x02, 0x00, 0x06, 0x24, 0x32, 0x5B]
-        ack = true
+        ack = True
         rcv = "received"
         while (rcv != ""):
             rcv = self.gpsSer.readline()
@@ -56,7 +56,7 @@ class GPSThread(threading.Thread):
         time.sleep(.1)
         for n in range(10):
             if(acknowledge[n] != self.gpsSer.read()):
-               ack = false
+               ack = False
         return ack
 
     def run(self):
@@ -957,7 +957,11 @@ class main:
                 # Send a GPS update through the RFD
                 if(self.gpsEnabled):
                     if(not self.gpsQ.empty()):
-                        gps = "GPS:" + str(self.gpsQ.get())
+                        gps = str(self.gpsQ.get())
+                        if(gps.startsWith("Air") or gps.startsWith("WARNING")):
+                            gps = "gps:" + gps
+                        else:
+                            gps = "GPS:" + gps
                         self.ser.write(gps)
                         while(not self.gpsQ.empty()):
                             self.gpsQ.get()
@@ -967,7 +971,7 @@ class main:
                     if(not self.tempQ.empty()):
                         self.recentTemp = str(self.tempQ.get())
                         print("Temperature: "+self.recentTemp)
-                        while(not self.tempQ.empty()):gpsExceptionsQ
+                        while(not self.tempQ.empty()):
                             self.tempQ.get()
                 else:
                     self.recentTemp = "False"
